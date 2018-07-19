@@ -13,6 +13,182 @@ BIDS_APP_MEMORY_LIMIT=$(( $(cat /sys/fs/cgroup/memory/memory.limit_in_bytes) - 6
 # 1.24 and 1.29
 DOCKER_API_VERSION=1.29
 
+#
+# Function Description:
+#  Show usage information for this script
+#
+usage()
+{
+	echo ""
+	echo "  An S3/ECS wrapper container for managing BIDS apps. "
+	echo ""
+	echo "  Usage: run-bids-app.sh <options>"
+	echo ""
+	echo "  Options: [ ] = optional; < > = user supplied value"
+	echo ""
+	echo "   [--help] : show usage information and exit"
+    echo "    --aws-access-key-id=AWS access keys to access s3 instance"
+	echo "    --aws-secret-key=AWS secret key"
+	echo "    --bids-analysis-id=A unique key for a combination of dataset and parameters"
+	echo "    --bids-container=path:tag for BIDS app container"
+	echo "    --bids-dataset-bucket=S3 Bucket containing BIDS directories"
+	echo "    --bids-output-bucket=Writable S3 Bucket for output"
+	echo "    --bids-snapshot-id=The key to reference which BIDS directory"
+	echo "    --bids-analysis-level=Select for participant, group, etc"
+	echo "    --bids-arguments=Additional required parameters"
+	echo "   [--disable-prune=Prevents the container from removing images/volumes]"
+	echo ""
+}
+
+get_options()
+{
+	local arguments=($@)
+
+	# initialize global output variables
+	unset AWS_ACCESS_KEY_ID
+	unset AWS_SECRET_KEY
+	unset BIDS_ANALYSIS_ID
+	unset BIDS_CONTAINER
+	unset BIDS_DATASET_BUCKET
+	unset BIDS_OUTPUT_BUCKET
+	unset BIDS_SNAPSHOT_ID
+	unset BIDS_ANALYSIS_LEVEL
+	unset BIDS_ARGUMENTS
+	unset DISABLE_PRUNE
+
+	# parse arguments
+	local num_args=${#arguments[@]}
+	local argument
+	local index=0
+
+	while [ ${index} -lt ${num_args} ]; do
+		argument=${arguments[index]}
+
+		case ${argument} in
+			--help)
+				usage
+				exit 1
+				;;
+			--aws-access-key-id=*)
+				g_path_to_study_folder=${argument#*=}
+				index=$(( index + 1 ))
+				;;
+			--aws-secret-key=*)
+				g_path_to_study_folder=${argument#*=}
+				index=$(( index + 1 ))
+				;;
+			--bids-analysis-id=*)
+				g_subject=${argument#*=}
+				index=$(( index + 1 ))
+				;;
+			--bids-container=*)
+				g_fmri_name=${argument#*=}
+				index=$(( index + 1 ))
+				;;
+			--bids-dataset-bucket=*)
+				g_high_pass=${argument#*=}
+				index=$(( index + 1 ))
+				;;
+			--bids-output-bucket=*)
+				g_reg_name=${argument#*=}
+				index=$(( index + 1 ))
+				;;
+			--bids-snapshot-id=*)
+				g_low_res_mesh=${argument#*=}
+				index=$(( index + 1 ))
+				;;
+			--bids-analysis-level=*)
+				g_final_fmri_res=${argument#*=}
+				index=$(( index + 1 ))
+				;;
+			--bids-arguments=*)
+				g_brain_ordinates_res=${argument#*=}
+				index=$(( index + 1 ))
+				;;
+			--disable-prune=*)
+				g_smoothing_fwhm=${argument#*=}
+				index=$(( index + 1 ))
+				;;
+			*)
+				usage
+				echo "ERROR: unrecognized option: ${argument}"
+				echo ""
+				exit 1
+				;;
+		esac
+	done
+
+	local error_count=0
+	# check required parameters
+	if [ -z "${g_path_to_study_folder}" ]; then
+		echo "ERROR: path to study folder (--path= or --study-folder=) required"
+		error_count=$(( error_count + 1 ))
+	else
+		log_Msg "g_path_to_study_folder: ${g_path_to_study_folder}"
+	fi
+
+	if [ -z "${g_subject}" ]; then
+		echo "ERROR: subject ID required"
+		error_count=$(( error_count + 1 ))
+	else
+		log_Msg "g_subject: ${g_subject}"
+	fi
+
+	if [ -z "${g_fmri_name}" ]; then
+		echo "ERROR: fMRI name required"
+		error_count=$(( error_count + 1 ))
+	else
+		log_Msg "g_fmri_name: ${g_fmri_name}"
+	fi
+
+	if [ -z "${g_high_pass}" ]; then
+		echo "ERROR: high pass required"
+		error_count=$(( error_count + 1 ))
+	else
+		log_Msg "g_high_pass: ${g_high_pass}"
+	fi
+
+	if [ -z "${g_reg_name}" ]; then
+		echo "ERROR: registration name required"
+		error_count=$(( error_count + 1 ))
+	else
+		log_Msg "g_reg_name: ${g_reg_name}"
+	fi
+
+	if [ -z "${g_low_res_mesh}" ]; then
+		echo "ERROR: low resolution mesh size required"
+		error_count=$(( error_count + 1 ))
+	else
+		log_Msg "g_low_res_mesh: ${g_low_res_mesh}"
+	fi
+
+	if [ -z "${g_final_fmri_res}" ]; then
+		echo "ERROR: final fMRI resolution required"
+		error_count=$(( error_count + 1 ))
+	else
+		log_Msg "g_final_fmri_res: ${g_final_fmri_res}"
+	fi
+
+	if [ -z "${g_brain_ordinates_res}" ]; then
+		echo "ERROR: brain ordinates resolution required"
+		error_count=$(( error_count + 1 ))
+	else
+		log_Msg "g_brain_ordinates_res: ${g_brain_ordinates_res}"
+	fi
+
+	if [ -z "${g_smoothing_fwhm}" ]; then
+		echo "ERROR: smoothing full width at half max value required"
+		error_count=$(( error_count + 1 ))
+	else
+		log_Msg "g_smoothing_fwhm: ${g_smoothing_fwhm}"
+	fi
+
+	if [ ${error_count} -gt 0 ]; then
+		echo "For usage information, use --help"
+		exit 1
+	fi
+}
+
 function docker_api_query {
     curl -s --unix-socket /var/run/docker.sock http:/$DOCKER_API_VERSION/$1
 }
