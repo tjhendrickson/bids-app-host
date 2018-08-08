@@ -16,6 +16,9 @@ export BIDS_ANALYSIS_LEVEL
 export BIDS_ARGUMENTS
 export GOPATH=${HOME}/go
 export PATH=/usr/local/go/bin:${PATH}:${GOPATH}/bin
+export SINGULARITY_PULLFOLDER=/
+export SINGULARITY_LOCALCACHEDIR=/tmp
+export SINGULARITY_CACHEDIR=/tmp
 
 
 %post
@@ -68,6 +71,10 @@ export BIDS_ANALYSIS_LEVEL
 export BIDS_ARGUMENTS
 export GOPATH=${HOME}/go
 export PATH=/usr/local/go/bin:${PATH}:${GOPATH}/bin
+export SINGULARITY_PULLFOLDER=/
+export SINGULARITY_LOCALCACHEDIR=/tmp
+export SINGULARITY_CACHEDIR=/tmp
+
 
 %runscript
 /usr/local/bin/run-bids-app-singularity.sh

@@ -24,6 +24,7 @@ usage()
 	echo "    --aws-secret-key=AWS secret key"
 	echo "    --bids-analysis-id=A unique key for a combination of dataset and parameters"
 	echo "    --bids-container=path:tag for BIDS app container"
+	echo "	  --bids-container-hosting=container hosting (singularity or docker) service of bids container"
 	echo "    --bids-dataset-bucket=S3 Bucket containing BIDS directories"
 	echo "    --output-bucket=Writable S3 Bucket for output"
 	echo "    --bids-snapshot-id=The key to reference which BIDS directory"
@@ -74,6 +75,10 @@ get_options()
 				;;
 			--bids-container=*)
 				g_bids-container=${argument#*=}
+				index=$(( index + 1 ))
+				;;
+			--bids-container-hosting=*)
+				g_bids-container-hosting=${argument#*=}
 				index=$(( index + 1 ))
 				;;
 			--bids-dataset-bucket=*)
@@ -135,6 +140,13 @@ get_options()
 		log_Msg "g_bids-container: ${g_bids-container}"
 	fi
 
+	if [ -z "${g_bids-container-hosting}" ]; then
+		echo "ERROR: bids container hosting (--bids-container-hosting) required"
+		error_count=$(( error_count + 1 ))
+	else
+		log_Msg "g_bids-container-hosting: ${g_bids-container-hosting}"
+	fi
+
 	if [ -z "${g_bids-dataset-bucket}" ]; then
 		echo "ERROR: bids dataset bucket (--bids-dataset-bucket) required"
 		error_count=$(( error_count + 1 ))
@@ -177,65 +189,40 @@ get_options()
 }
 
 function pull_and_prune {
+	
     set +eo pipefail
-    # Allow for one retry if the first pull fails
-    docker pull "$1" || { docker_cleanup && docker pull "$1"; }
+	if [ "$2" == "docker" ]; then
+		registry = "docker://"
+	elif
+		registry = "singularity://"
+	fi
+	# Allow for one retry if the first pull fails
+    singularity pull "${2}${1}"
     set -eo pipefail
+	rm -rf ${SINGULARITY_CACHEDIR}/.singularity*
 }
 
-if [ -z "$BIDS_CONTAINER" ]; then
-    echo "Error: Missing env variable BIDS_CONTAINER." && exit 1
-elif [ -z "$BIDS_DATASET_BUCKET" ] && [ -z "$DEBUG" ]; then
-    echo "Error: Missing env variable BIDS_DATASET_BUCKET." && exit 1
-elif [ -z "$OUTPUT_BUCKET" ] && [ -z "$DEBUG" ]; then
-    echo "Error: Missing env variable OUTPUT_BUCKET." && exit 1
-elif [ -z "$BIDS_INPUT_BUCKET" ] && [ -z "$DEBUG" ]; then
-    echo "Error: Missing env variable BIDS_INPUT_BUCKET." && exit 1
-elif [ -z "$BIDS_SNAPSHOT_ID" ]; then
-    echo "Error: Missing env variable BIDS_SNAPSHOT_ID." && exit 1
-elif [ -z "$BIDS_ANALYSIS_ID" ]; then
-    echo "Error: Missing env variable BIDS_ANALYSIS_ID." && exit 1
-elif [ -z "$BIDS_ANALYSIS_LEVEL" ]; then
-    echo "Error: Missing env variable BIDS_ANALYSIS_LEVEL." && exit 1
-fi
-
-# Make sure the host docker instance is running
-set +e # Disable -e because we expect docker ps to sometimes fail
-ATTEMPTS=1
-until docker ps &> /dev/null || [ $ATTEMPTS -eq 13 ]; do
-    sleep 5
-    ((ATTEMPTS++))
-done
-set -e
-
-if [ $ATTEMPTS -eq 13 ]; then
-    echo "Failed to find Docker service before timeout"
-    exit 1
-fi
-
 AWS_CLI_CONTAINER=infrastructureascode/aws-cli:1.11.89
-pull_and_prune "$AWS_CLI_CONTAINER"
-# Pull once, if pull fails, try to prune
-# if the second pull fails this will exit early
-pull_and_prune "$BIDS_CONTAINER"
+pull_and_prune "$AWS_CLI_CONTAINER" docker
+pull_and_prune"$BIDS_CONTAINER" ${g_bids-container-hosting}
 
 # On exit, copy the output
 function sync_output {
     set +e
-    docker run --rm -v "$AWS_BATCH_JOB_ID":/output $AWS_CLI_CONTAINER aws s3 sync --only-show-errors /output/data s3://"$OUTPUT_BUCKET"/"$BIDS_SNAPSHOT_ID"/"$BIDS_ANALYSIS_ID"
-    DOCKER_EC=$?
-    if (( $DOCKER_EC == 2 )); then
-        echo "Warning: aws s3 sync output returned status code 2"
+    singularity run -v "$AWS_BATCH_JOB_ID":/output $AWS_CLI_CONTAINER s3cmd s3 sync --only-show-errors /output/data s3://"$OUTPUT_BUCKET"/"$BIDS_SNAPSHOT_ID"/"$BIDS_ANALYSIS_ID"
+    SINGULARITY_EC=$?
+    if (( $SINGULARITY_EC == 2 )); then
+        echo "Warning: s3cmd s3 sync output returned status code 2"
         echo "Some files may not have been copied"
     else
-        if (( $DOCKER_EC != 0 )); then
+        if (( $SINGULARITY_EC != 0 )); then
             # Pass any unhandled exit codes back to Batch
-            exit $DOCKER_EC
+            exit $SINGULARITY_EC
         fi
     fi
     # Unlock these volumes
-    docker rm -f "$AWS_BATCH_JOB_ID"-lock || echo "No lock found for ${AWS_BATCH_JOB_ID}"
-    set -e
+    #docker rm -f "$AWS_BATCH_JOB_ID"-lock || echo "No lock found for ${AWS_BATCH_JOB_ID}"
+    #set -e
 
     # Cleanup at end of job
     docker_cleanup
@@ -245,41 +232,41 @@ function sync_output {
 trap sync_output EXIT SIGTERM
 
 # Create volumes for snapshot/output if they do not already exist
-echo "Creating snapshot volume:"
-docker volume create --name "$BIDS_SNAPSHOT_ID"
-echo "Creating output volume:"
-docker volume create --name "$AWS_BATCH_JOB_ID"
+#echo "Creating snapshot volume:"
+#docker volume create --name "$BIDS_SNAPSHOT_ID"
+#echo "Creating output volume:"
+#docker volume create --name "$AWS_BATCH_JOB_ID"
 
 # Check for file input hash "array" string
 # right now we are only supporting a single file
 # left this is an array so we can support multi file in the future
-if [ "$INPUT_HASH_LIST" ]; then
-    echo "Input file hash array found"
-    # Convert hash list into a bash array
-    INPUT_BASH_ARRAY=( `echo ${INPUT_HASH_LIST}` )
-    for hash in "${INPUT_BASH_ARRAY[@]}"
-    do
-        HASH_INCLUDES+="--include *$hash* "
-        HASH_STRING+="$hash"
-    done
+#if [ "$INPUT_HASH_LIST" ]; then
+#    echo "Input file hash array found"
+#    # Convert hash list into a bash array
+#    INPUT_BASH_ARRAY=( `echo ${INPUT_HASH_LIST}` )
+#    for hash in "${INPUT_BASH_ARRAY[@]}"
+#    do
+#        HASH_INCLUDES+="--include *$hash* "
+#        HASH_STRING+="$hash"
+#    done
     # Create input volume
-    echo "Creating input volume:"
-    docker volume create --name "${BIDS_INPUT_BUCKET}_${HASH_STRING}"
+#    echo "Creating input volume:"
+#    docker volume create --name "${BIDS_INPUT_BUCKET}_${HASH_STRING}"
     # Input command to copy input files from s3. Again only single file support right now.  Hence ${INPUT_BASH_ARRAY[0]}
-    docker run --rm -v "${BIDS_INPUT_BUCKET}_${HASH_STRING}":/input $AWS_CLI_CONTAINER flock /input/lock aws s3 cp s3://${BIDS_INPUT_BUCKET}/ /input/data --recursive --exclude \* $HASH_INCLUDES
+#    docker run --rm -v "${BIDS_INPUT_BUCKET}_${HASH_STRING}":/input $AWS_CLI_CONTAINER flock /input/lock s3cmd s3 cp s3://${BIDS_INPUT_BUCKET}/ /input/data --recursive --exclude \* $HASH_INCLUDES
 fi
 
 # Prevent a race condition where another container deletes these volumes
 # after the syncs but before the main task starts
 # Timeout after ten minutes to prevent infinite jobs
 if [ "$INPUT_HASH_LIST" ]; then
-    docker run --rm -d --name "$AWS_BATCH_JOB_ID"-lock -v "$BIDS_SNAPSHOT_ID":/snapshot -v "$AWS_BATCH_JOB_ID":/output -v "$BIDS_INPUT_BUCKET_$HASH_STRING":/input $AWS_CLI_CONTAINER sh -c 'sleep 600'
+    singularity run -p --name "$AWS_BATCH_JOB_ID"-lock -B "$BIDS_SNAPSHOT_ID":/snapshot -B "$AWS_BATCH_JOB_ID":/output -B "$BIDS_INPUT_BUCKET_$HASH_STRING":/input $AWS_CLI_CONTAINER sh -c 'sleep 600'
 else
-    docker run --rm -d --name "$AWS_BATCH_JOB_ID"-lock -v "$BIDS_SNAPSHOT_ID":/snapshot -v "$AWS_BATCH_JOB_ID":/output $AWS_CLI_CONTAINER sh -c 'sleep 600'
-fi
+    singularity run -p -d --name "$AWS_BATCH_JOB_ID"-lock -B "$BIDS_SNAPSHOT_ID":/snapshot -B "$AWS_BATCH_JOB_ID":/output $AWS_CLI_CONTAINER sh -c 'sleep 600'
+#fi
 # Sync those volumes
-SNAPSHOT_COMMAND="aws s3 sync --only-show-errors s3://${BIDS_DATASET_BUCKET}/${BIDS_SNAPSHOT_ID} /snapshot/data"
-OUTPUT_COMMAND="aws s3 sync --only-show-errors s3://${OUTPUT_BUCKET}/${BIDS_SNAPSHOT_ID}/${BIDS_ANALYSIS_ID} /output/data"
+SNAPSHOT_COMMAND="s3cmd s3 sync --only-show-errors s3://${BIDS_DATASET_BUCKET}/${BIDS_SNAPSHOT_ID} /snapshot/data"
+OUTPUT_COMMAND="s3cmd s3 sync --only-show-errors s3://${OUTPUT_BUCKET}/${BIDS_SNAPSHOT_ID}/${BIDS_ANALYSIS_ID} /output/data"
 
 # Only copy the participants needed for this analysis
 if [ "$BIDS_ANALYSIS_LEVEL" = "participant" ]; then
@@ -291,7 +278,7 @@ if [ "$BIDS_ANALYSIS_LEVEL" = "participant" ]; then
     do
         INCLUDES+="--include sub-${PART}/* "
     done
-    SNAPSHOT_COMMAND="aws s3 sync --only-show-errors ${EXCLUDE} ${INCLUDES} s3://${BIDS_DATASET_BUCKET}/${BIDS_SNAPSHOT_ID} /snapshot/data"
+    SNAPSHOT_COMMAND="s3cmd s3 sync --only-show-errors ${EXCLUDE} ${INCLUDES} s3://${BIDS_DATASET_BUCKET}/${BIDS_SNAPSHOT_ID} /snapshot/data"
 fi
 
 if [ -z "$AWS_ACCESS_KEY_ID" ]; then
