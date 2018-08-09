@@ -2,7 +2,8 @@ Bootstrap: docker
 From: ubuntu:xenial-20180726
 
 %files
-run-bids-app-singularity.sh /usr/local/bin/run-bids-app-singularity.sh
+run.py /run.py
+modified_files/generic-msi.s3cfg /etc/
 
 %environment
 
@@ -23,16 +24,21 @@ export SINGULARITY_CACHEDIR=/tmp
 
 %post
 
-#make run-bids-app-singularity.sh executable
-chmod +x /usr/local/bin/run-bids-app-singularity.sh
+#make /run.py executable
+chmod +x /run.py
+
+#make generic-msi.s3cfg copyable
+chmod 555 -R /etc/
 
 #make local folders
-mkdir /snapshot && \
+mkdir /snapshot
 mkdir /output
+mkdir /SW
 
-#set up basic tools
+#set up basic tools including python3
 apt-get update
-apt-get install bash jq curl util-linux python dh-autoreconf build-essential libssl-dev uuid-dev libgpgme11-dev libarchive-dev git wget -y
+apt-get install bash jq curl util-linux python3-pip python3 python3-setuptools python3-dev dh-autoreconf build-essential libffi-dev libssl-dev uuid-dev libgpgme11-dev libarchive-dev git wget -y
+apt-get -y upgrade
 
 #install golang 1.10.2
 cd /tmp
@@ -61,6 +67,21 @@ make install
 cd ..
 ./mconfig -p /usr/local -b ./buildtree
 
+#singularity python3 api
+export LC_ALL=C
+cd /SW
+git clone https://www.github.com/singularityhub/singularity-cli.git
+cd singularity-cli/
+python3 setup.py install
+pip3 install -r requirements.txt
+
+#install s3cmd version 2.0.2
+apt-get update
+cd /SW
+wget -qO- https://sourceforge.net/projects/s3tools/files/s3cmd/2.0.2/s3cmd-2.0.2.tar.gz | tar zxv -C /SW
+cd s3cmd-2.0.2
+python3 setup.py install
+
 #set up environment within container
 export BIDS_ANALYSIS_ID
 export BIDS_CONTAINER
@@ -75,8 +96,7 @@ export SINGULARITY_PULLFOLDER=/
 export SINGULARITY_LOCALCACHEDIR=/tmp
 export SINGULARITY_CACHEDIR=/tmp
 
-
 %runscript
-/usr/local/bin/run-bids-app-singularity.sh
+/run.py
 
 
